@@ -1,0 +1,14 @@
+{
+  "name": "printfair-ui",
+  "version": "0.2.0",
+  "private": true,
+  "description": "PrintFair mobile interface and PC document retrieval webpage",
+  "scripts": {
+    "serve": "python -m http.server 8765 --directory www"
+  },
+  "devDependencies": {},
+  "cordova": {
+    "platforms": [],
+    "plugins": {}
+  }
+}

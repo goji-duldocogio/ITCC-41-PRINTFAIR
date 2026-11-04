@@ -1,0 +1,9 @@
+{
+ "name":"PrintFair - XU Library Printing Support",
+ "short_name":"PrintFair",
+ "start_url":"./index.html",
+ "display":"standalone",
+ "background_color":"#f5f7fb",
+ "theme_color":"#194785",
+ "icons":[{"src":"assets/app-icon.png","type":"image/png","sizes":"256x256","purpose":"any maskable"}]
+}

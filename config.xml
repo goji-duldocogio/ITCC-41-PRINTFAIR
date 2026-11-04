@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<widget id="edu.xu.printfair.prototype" version="0.2.0" xmlns="http://www.w3.org/ns/widgets" xmlns:cdv="http://cordova.apache.org/ns/1.0">
+ <name>PrintFair</name>
+ <description>Mobile printing request and management interface for XU Library.</description>
+ <author>ITCC 41 PrintFair Project Group</author>
+ <content src="index.html" />
+ <access origin="*" />
+ <preference name="DisallowOverscroll" value="true" />
+ <preference name="StatusBarStyle" value="default" />
+ <preference name="Orientation" value="portrait" />
+ <platform name="android"><preference name="AndroidWindowSplashScreenBackground" value="#194785" /></platform>
+</widget>
