@@ -1,0 +1,11 @@
+# Default ignored files
+/shelf/
+/workspace.xml
+
+# Node and Cordova generated files
+node_modules/
+platforms/
+plugins/
+
+# IDE settings
+.idea/

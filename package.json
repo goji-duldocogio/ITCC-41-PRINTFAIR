@@ -7,9 +7,13 @@
     "serve": "python -m http.server 8765 --directory www",
     "test": "node tests/printfair-smoke-test.js"
   },
-  "devDependencies": {},
+  "devDependencies": {
+    "cordova-android": "^15.1.0"
+  },
   "cordova": {
-    "platforms": [],
+    "platforms": [
+      "android"
+    ],
     "plugins": {}
   }
 }
