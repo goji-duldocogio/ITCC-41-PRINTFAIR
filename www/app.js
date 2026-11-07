@@ -4,7 +4,9 @@
 (() => {
   'use strict';
 
-  const STORE_KEY = 'printfair-m2-prototype-2026';
+  const STORE_KEY = 'printfair-m3-prototype-2026';
+  const backend = window.PrintFairBackend;
+  const cloudMode = Boolean(backend?.isConfigured());
   const LIMIT = 20;
   const $ = selector => document.querySelector(selector);
   const escapeHTML = value => String(value ?? '').replace(/[&<>"']/g, c => ({
@@ -29,6 +31,9 @@
   const VALID = Object.keys(STATUS);
   let signInRole = 'student';
   let uiDraftFileUrl = null;
+  let selectedPdfFile = null;
+  let selectedPdfBytes = null;
+  let stopLiveUpdates = null;
   let profileReturn = 'dashboard';
   let correctionTarget = null;
 
@@ -53,27 +58,28 @@
     };
     const jordan = { name:'Jordan Cruz', display:'JORDAN CRUZ', email:'20260021919@my.xu.edu.ph', year:'1st Year', program:'BS Information Technology' };
     return {
-      version: 3, role: null, previewTime: demoTime(day), student: mika,
+      version: 4, role: null, previewTime: demoTime(day), student: mika,
       stations: [
         { id:'old2', name:'Old Library', floor:'2nd floor', status:'Operational', reason:'', updatedAt:demoTime(day) },
         { id:'new2', name:'New Library', floor:'2nd floor', status:'Unavailable', reason:'Printer maintenance reported', updatedAt:demoTime(day) },
-        { id:'new5', name:'New Library', floor:'5th floor', status:'Operational', reason:'', updatedAt:demoTime(day) }
+        { id:'new5', name:'New Library', floor:'5th floor', status:'Operational', reason:'', updatedAt:demoTime(day) },
+        { id:'med5', name:'School of Medicine', floor:'5th floor', status:'Operational', reason:'', updatedAt:demoTime(day) }
       ],
       requests: [
-        sampleRecord('PF-0241','Research_Paper.pdf',8,'Reserved',`${day}T14:15:00+08:00`,mika,{totalPages:12,pageRange:'1-8',code:'CN3-0241'}),
+        sampleRecord('PF-0241','Research_Paper.pdf',8,'Reserved',`${day}T14:15:00+08:00`,mika,{totalPages:8,pageRange:'1-8',code:'CN3-0241'}),
         sampleRecord('PF-0240','Lab_Handout.pdf',6,'Retrieved',`${day}T11:40:00+08:00`,mika,{stationId:'new5'}),
         sampleRecord('PF-0239','Essay_Final.pdf',3,'Retrieved',`${day}T10:12:00+08:00`,jordan,{stationId:'old2'}),
         sampleRecord('PF-0238','ITCC31_Lab_ACT4.pdf',4,'Cancelled','2026-10-30T09:15:00+08:00',mika)
       ],
       nextId: 242,
-      draft: { file:'22.1_Research_Paper.pdf', totalPages:12, range:'1-8', isSample:true },
+      draft: { file:'No document selected', totalPages:0, range:'', isSample:false },
       corrections: []
     };
   }
 
   function migrate(raw) {
     if (!raw || !Array.isArray(raw.requests)) return initialState();
-    if (raw.version === 3) return raw;
+    if (raw.version === 4) return raw;
     const next = initialState();
     next.role = raw.role || null;
     next.student = { ...next.student, ...(raw.student || {}) };
@@ -81,7 +87,7 @@
     next.nextId = Number(raw.counter) || 242;
     if (raw.draft) next.draft = {
       file: raw.draft.file || next.draft.file,
-      totalPages: Number(raw.draft.pages) || 12, range: raw.draft.range || '1-8', isSample:true
+      totalPages: Number(raw.draft.pages) || 0, range: raw.draft.range || '', isSample:true
     };
     const legacy = [...raw.requests, ...(Array.isArray(raw.transactions) ? raw.transactions : [])];
     const seen = new Set();
@@ -104,29 +110,21 @@
   }
 
   let state;
-  try { state = migrate(JSON.parse(localStorage.getItem(STORE_KEY) || 'null')); }
+  try { state = migrate(JSON.parse(localStorage.getItem(STORE_KEY) || localStorage.getItem('printfair-m2-prototype-2026') || 'null')); }
   catch { state = initialState(); }
-  const save = () => { try { localStorage.setItem(STORE_KEY, JSON.stringify(state)); } catch(e) { console.warn('Demo storage could not be saved',e); } };
+  // A File object cannot survive a page reload; require the student to reselect the PDF.
+  if (state.draft && state.draft.totalPages) state.draft = { file:'No document selected', totalPages:0, range:'', isSample:false };
+  const save = () => { if (cloudMode) return; try { localStorage.setItem(STORE_KEY, JSON.stringify(state)); } catch(e) { console.warn('Demo storage could not be saved',e); } };
   const currentUserRequests = () => state.requests.filter(r => r.email === state.student.email);
   const activeRequest = () => currentUserRequests().find(r => r.status === 'Reserved') || null;
-  const isToday = r => String(r.createdAt).slice(0,10) === state.previewTime.slice(0,10);
+  const isToday = r => { if(!r.createdAt) return false; const d=localParts(new Date(r.createdAt)); return `${d.year}-${d.month}-${d.day}` === todayKey(); };
   const usedPages = () => currentUserRequests().filter(isToday).reduce((n,r) => n + (Number(r.countedPages) || 0), 0);
   const pendingPages = () => currentUserRequests().filter(r => isToday(r) && r.status === 'Reserved').reduce((n,r)=>n+r.pages,0);
   const remainingPages = () => Math.max(0, LIMIT - usedPages() - pendingPages());
   const stationTitle = id => { const s = state.stations.find(x => x.id === id); return s ? `${s.name} · ${s.floor}` : 'Not recorded'; };
-  const validRange = (value,max) => {
-    const parts=String(value).replace(/\s+/g,'').split(',');
-    if (!parts.length || parts.length > max) return null;
-    const chosen=new Set();
-    for (const part of parts) {
-      if (!/^\d+(?:-\d+)?$/.test(part)) return null;
-      const [first,last=first]=part.split('-').map(Number);
-      if (first < 1 || last < first || last > max) return null;
-      for(let page=first;page<=last;page++) chosen.add(page);
-    }
-    return chosen.size;
-  };
+  const validRange = (value,max) => window.PrintFairRules.parsePageRange(value,max);
   function expirePending() {
+    if (cloudMode) return; // Cloud expiry is enforced by the database when a code is claimed.
     // A frozen afternoon clock lets the course UI demo work after library hours.
     const current=now().getTime(); let changed=false;
     for(const r of state.requests) {
@@ -137,8 +135,8 @@
     if(changed) save();
   }
   function permittedCorrection(record, next) {
-    if (next === record.status) return true;
     if (next === 'Reserved') return false;
+    if (next === record.status) return true;
     if (next === 'Retrieved') return Boolean(record.retrievedAt);
     return ['Failed','Cancelled','Expired'].includes(next);
   }
@@ -214,18 +212,21 @@
     return shell(heading('Upload PDF','Step 1 of 2 - Prepare your document') +
       '<div class="stepbar"><span class="on"></span><span></span></div><div class="row between xs"><strong>1 Upload document</strong><span class="text-muted">2 Review</span></div>' +
       `<div class="uploadbox"><span class="uploadico">${icon('upload',29)}</span><b>Choose a PDF document</b><span class="sm text-muted">Upload your finished, ready-to-print file.</span><label class="btn sm" for="pdf-file">Browse files</label><input id="pdf-file" type="file" accept="application/pdf,.pdf" class="visually-hidden"></div>` +
-      '<div class="label">SELECTED DOCUMENT</div>' + card(`<div class="row"><span class="docicon">${icon('file',19)}</span><div class="docinfo"><div class="filename">${escapeHTML(draft.file)}</div><div class="meta">${draft.totalPages} pages · ${draft.isSample?'Sample UI document':'Selected PDF (sample count)'}</div></div><span class="positive-icon">${icon('check',19)}</span></div>`) +
-      `<div class="notice">${icon('info',15)} <b>Before you continue</b><br>Only upload academic, ready-to-print PDFs. Finish editing before visiting the library.</div>` +
-      button('Continue to preview','review','btn block',true) + '<p class="xs text-muted centered">For demo for now.</p></div>', 'requests');
+      '<div class="label">SELECTED DOCUMENT</div>' + (draft.totalPages > 0
+        ? card(`<div class="row"><span class="docicon">${icon('file',19)}</span><div class="docinfo"><div class="filename">${escapeHTML(draft.file)}</div><div class="meta">${draft.totalPages} actual PDF pages</div></div><span class="positive-icon">${icon('check',19)}</span></div>`)
+        : card('<div class="row"><span class="docicon">'+icon('file',19)+'</span><div class="docinfo"><div class="filename">No PDF selected</div><div class="meta">Choose a valid PDF to see its actual page count.</div></div></div>')) +
+      `<div class="notice">${icon('info',15)} <b>Before you continue</b><br>Only upload academic, ready-to-print PDFs. Maximum upload size: 20 MB. Finish editing before visiting the library.</div>` +
+      button('Continue to preview','review','btn block',true) + `<p class="xs text-muted centered">${cloudMode?'PDFs are stored privately when the shared backend is configured.':'Demo mode: local documents stay in this browser only.'}</p></div>`, 'requests');
   }
   function review() {
     const draft=state.draft;
+    if (!draft.totalPages || !selectedPdfFile) return shell(heading('No PDF selected','Choose a valid PDF before reviewing your request.')+button('Back to upload','upload','btn block top')+'</div>','requests');
     const pages=validRange(draft.range,draft.totalPages);
-    const allowed=pages!==null && pages<=remainingPages() && !activeRequest();
+    const allowed=pages!==null && window.PrintFairRules.canReserve(remainingPages(),pages) && !activeRequest();
     const validation=activeRequest()?'You already have an active request.':pages===null?'Enter a page range within the document.':pages>remainingPages()?`Only ${remainingPages()} pages are currently available.`:`Within your recorded allowance. Available: ${remainingPages()} · Request: ${pages} · Remaining: ${remainingPages()-pages}`;
     return shell(heading('Review & submit','Step 2 of 2 - Check your printing request') +
       '<div class="stepbar"><span class="on"></span><span class="on"></span></div><div class="row between xs"><strong>1 Uploaded</strong><strong>2 Review</strong></div>' +
-      card(`<div class="review-file">${icon('file',17)} <span class="filename">${escapeHTML(draft.file)}</span><span class="meta">${draft.totalPages} pages</span></div><div class="row top"><div class="pdfpreview"><div class="pdf-page"><div class="fake-line dark"></div>${'<div class="fake-line"></div>'.repeat(5)}<div class="tiny text-muted centered" id="preview-page-num">1</div></div></div><div class="flex1"><b class="sm">Document preview</b><div class="bold top">Page <span id="preview-current">1</span> of ${draft.totalPages}</div><p class="sm text-muted">Review the document layout.</p><div class="row">${button(icon('left',16),'prev-preview','btn ghost sm')}${button(icon('arrow',16),'next-preview','btn ghost sm')}</div></div></div>`, 'top') +
+      card(`<div class="review-file">${icon('file',17)} <span class="filename">${escapeHTML(draft.file)}</span><span class="meta">${draft.totalPages} pages</span></div><div class="row top"><div class="pdfpreview"><div class="pdf-page"><canvas id="pdf-preview-canvas" aria-label="Selected PDF page preview"></canvas></div></div><div class="flex1"><b class="sm">Document preview</b><div class="bold top">Page <span id="preview-current">1</span> of ${draft.totalPages}</div><p class="sm text-muted">Review the document layout.</p><div class="row">${button(icon('left',16),'prev-preview','btn ghost sm')}${button(icon('arrow',16),'next-preview','btn ghost sm')}</div></div></div>`, 'top') +
       card(`<b class="sm">Pages to print</b><p class="xs text-muted">Choose a range (example: 1-8)</p><div class="field-row"><input id="page-range" class="range-input" aria-label="Page range" value="${escapeHTML(draft.range)}"><span class="sm" id="range-count">${pages===null?'Invalid range':`${pages} pages selected`}</span></div>`, 'top') +
       `<div class="notice ${allowed?'green':'red'}" id="validation-notice">${escapeHTML(validation)}</div>` +
       button('Submit print request','submit','btn block',true) + '<p class="xs text-muted centered">A retrieval code is generated after submission.</p></div>', 'requests');
@@ -246,7 +247,7 @@
     if(!r) return shell(heading('Retrieval Code','No active request') + card('<p class="sm">There is no document currently awaiting retrieval.</p>')+button('Back to requests','requests','btn block top')+'</div>','requests');
     return shell(heading('Retrieval Code') + '<div class="text-status good-text">Ready for retrieval</div>' +
       card(`<div class="row"><span class="docicon">${icon('file',20)}</span><div><div class="filename">${escapeHTML(r.file)}</div><div class="meta">${r.pages} pages · PDF document<br>Requested ${timestampLabel(r.createdAt)}</div></div></div>`, 'top') +
-      `<div class="codebox"><small>YOUR RETRIEVAL CODE</small><div class="code">${escapeHTML(r.code)}</div><small>${icon('clock',12)} VALID UNTIL 4:30 PM or earlier</small></div>` +
+      `<div class="codebox"><small>YOUR RETRIEVAL CODE</small><div class="code">${escapeHTML(r.code)}</div><small>${icon('clock',12)} VALID UNTIL ${r.expiresAt?timestampLabel(r.expiresAt):'4:30 PM'}</small></div>` +
       card(`<b class="sm">How to retrieve your document</b><div class="col top">${[
         'Go to an available library printing station',
         'Enter the code on the PC webpage',
@@ -268,8 +269,8 @@
   }
   function profile(staff=false) {
     return shell(heading(staff?'Admin Profile':'My Profile','Manage your account details') +
-      card(`<div class="row"><span class="avatar">${staff?'LS':'MS'}</span><div class="docinfo"><b class="profile-name">${staff?'LIBRARY STAFF':escapeHTML(state.student.display)}</b><div class="meta">${staff?'library.staff@xu.edu.ph':escapeHTML(state.student.email)}</div><p class="role-description">${staff?'Staff account':'Student account'}</p></div></div>`) +
-      '<h2>Account information</h2>' + card(`<div class="record-row"><span class="k">Full name</span><span class="v">${staff?'Library Staff':escapeHTML(state.student.name)}</span></div><div class="record-row"><span class="k">XU email</span><span class="v">${staff?'library.staff@xu.edu.ph':escapeHTML(state.student.email)}</span></div>${staff?'':`<div class="record-row"><span class="k">Year level</span><span class="v">${escapeHTML(state.student.year)}</span></div><div class="record-row"><span class="k">Course / Program</span><span class="v">${escapeHTML(state.student.program)}</span></div>`}`) +
+      card(`<div class="row"><span class="avatar">${staff?'LS':'MS'}</span><div class="docinfo"><b class="profile-name">${escapeHTML(cloudMode?state.student.display:(staff?'LIBRARY STAFF':state.student.display))}</b><div class="meta">${escapeHTML(cloudMode?state.student.email:(staff?'library.staff@xu.edu.ph':state.student.email))}</div><p class="role-description">${staff?'Authorized library staff account':'Student account'}</p></div></div>`) +
+      '<h2>Account information</h2>' + card(`<div class="record-row"><span class="k">Full name</span><span class="v">${escapeHTML(cloudMode?state.student.name:(staff?'Library Staff':state.student.name))}</span></div><div class="record-row"><span class="k">XU email</span><span class="v">${cloudMode?escapeHTML(state.student.email):(staff?'library.staff@xu.edu.ph':escapeHTML(state.student.email))}</span></div>${staff?'':`<div class="record-row"><span class="k">Year level</span><span class="v">${escapeHTML(state.student.year)}</span></div><div class="record-row"><span class="k">Course / Program</span><span class="v">${escapeHTML(state.student.program)}</span></div>`}`) +
       '<h2>Library information</h2>' + card(`<button type="button" class="plain-row" data-route="guidelines">${icon('file',17)} Free printing guidelines ${icon('arrow',15)}</button>`) +
       button(`${icon('logout',16)} Sign out`,'logout','btn danger block top') +
       '</div>', staff?'profile-admin':'profile',staff);
@@ -316,29 +317,40 @@
   }
   function login() {
     return `<div class="shell login-shell">${brand()}${heading('Welcome to PrintFair')}
-      ${card(`<div class="field"><label for="login-email">XU Email Address</label><input id="login-email" type="email" value="${escapeHTML(state.student.email)}" autocomplete="username" placeholder="example@my.xu.edu.ph"></div><div class="field"><label for="login-password">Password</label><input id="login-password" type="password" placeholder="Password" autocomplete="current-password"></div><div class="right">${button('Forgot password?','forgot-password','link')}</div>${button('Sign In','sign-in','btn block top',true)}<div class="role-options"><button type="button" class="btn secondary sm ${signInRole==='student'?'selected':''}" data-action="role-student" aria-pressed="${signInRole==='student'}">Student</button><button type="button" class="btn secondary sm ${signInRole==='admin'?'selected':''}" data-action="role-admin" aria-pressed="${signInRole==='admin'}">Staff</button></div>`,'loginbox')}
+      ${card(`<div class="field"><label for="login-email">XU Email Address</label><input id="login-email" type="email" value="${cloudMode?'':escapeHTML(state.student.email)}" autocomplete="username" placeholder="example@my.xu.edu.ph"></div><div class="field"><label for="login-password">Password</label><input id="login-password" type="password" placeholder="Password" autocomplete="current-password"></div><div class="right">${button('Forgot password?','forgot-password','link')}</div>${button('Sign In','sign-in','btn block top',true)}<div class="role-options"><button type="button" class="btn secondary sm ${signInRole==='student'?'selected':''}" data-action="role-student" aria-pressed="${signInRole==='student'}">Student</button><button type="button" class="btn secondary sm ${signInRole==='admin'?'selected':''}" data-action="role-admin" aria-pressed="${signInRole==='admin'}">Staff</button></div>`,'loginbox')}
       <div class="notice blue centered login-note">For currently enrolled XU students<br>Staff accounts are issued to authorized personnel.</div>
-      <p class="xs text-muted centered">For demo for now.</p></div>`;
+      <p class="xs text-muted centered">${cloudMode?'Use your registered XU account. Staff access is issued by the project administrator.':'Local demo mode: sign-in does not verify a real password.'}</p>
+      ${cloudMode?button('Create student account','register','btn secondary block top'):''}</div>`;
+  }
+  function register() {
+    return `<div class="shell login-shell">${brand()}${heading('Create student account','Use your official XU email address')}
+      ${card(`<div class="field"><label for="register-name">Full name</label><input id="register-name" autocomplete="name" maxlength="100"></div>
+      <div class="field"><label for="register-email">XU email</label><input id="register-email" type="email" placeholder="name@my.xu.edu.ph" autocomplete="email"></div>
+      <div class="field"><label for="register-year">Year level</label><select id="register-year"><option value="">Select year</option>${['1st Year','2nd Year','3rd Year','4th Year','5th Year'].map(x=>`<option>${x}</option>`).join('')}</select></div>
+      <div class="field"><label for="register-program">Course / Program</label><input id="register-program" maxlength="100" placeholder="e.g. BS Information Technology"></div>
+      <div class="field"><label for="register-password">Password</label><input id="register-password" type="password" autocomplete="new-password" minlength="8"></div>
+      ${button('Create account','create-account','btn block top',true)}`,'loginbox')}
+      ${button('Back to sign in','back-to-login','btn secondary block top')}</div>`;
   }
   function guidelines() {
     return shell(heading('Free printing guidelines','XU Library service rules')+
       card(`<div class="rules"><p>Maximum 20 pages per student each day.</p><p>First come, first served at the library.</p><p>Students supply their own bond paper.</p><p>Printing is for academic use.</p><p>The existing physical logbook is still required.</p><p>Printing hours: 8:30–11:30 AM and 1:30–4:30 PM (provided XU notice).</p><p>Temporary PDFs are removed at the end of the service day.</p></div>`) + button('Back to profile','back-to-profile','btn block top')+'</div>',state.role==='admin'?'profile-admin':'profile',state.role==='admin');
   }
   const routes = {
-    login,dashboard,upload,review,requests,code,stations,allowance,
+    login,register,dashboard,upload,review,requests,code,stations,allowance,
     profile:()=>profile(false), 'dashboard-admin':adminDashboard,'stations-admin':adminStations,
     'transactions-admin':adminTransactions,'profile-admin':()=>profile(true),guidelines
   };
   function render() {
     expirePending();
     let r=route();
-    if(!state.role && r!=='login') { location.hash='#login'; r='login'; }
+    if(!state.role && !['login','register'].includes(r)) { location.hash='#login'; r='login'; }
     if (state.role === 'student' && (r.endsWith('-admin') || r.startsWith('transaction-detail/'))) { location.hash='#dashboard'; r='dashboard'; }
     if (state.role === 'admin' && ['dashboard','upload','review','requests','code','stations','allowance','profile'].includes(r)) { location.hash='#dashboard-admin'; r='dashboard-admin'; }
-    const match = r.match(/^(request-detail|transaction-detail)\/(PF-\d+)$/);
+    const match = r.match(/^(request-detail|transaction-detail)\/(PF-[A-Z0-9]+)$/i);
     const view = match ? () => details(match[2],match[1]==='transaction-detail') : (routes[r] || dashboard);
     $('#app').innerHTML = view();
-    if(r==='review') bindRange();
+    if(r==='review') { bindRange(); renderPdfPreview(Number($('#preview-current')?.textContent)||1); }
   }
   function navigate(page) { location.hash=`#${page}`; render(); window.scrollTo(0,0); }
   function notify(text) {
@@ -346,6 +358,83 @@
     const el=document.createElement('div'); el.className='toast'; el.textContent=text;
     document.body.appendChild(el); setTimeout(()=>el.remove(),3600);
   }
+  async function inspectPdf(file) {
+    if (!file) throw new Error('Choose a PDF document first.');
+    if (file.size <= 0) throw new Error('This file is empty. Choose a non-empty PDF.');
+    if (file.size > 20 * 1024 * 1024) throw new Error('The PDF is larger than the 20 MB upload limit.');
+    if (!/\.pdf$/i.test(file.name) || (file.type && file.type !== 'application/pdf')) throw new Error('Only PDF documents are accepted.');
+    const bytes = await file.arrayBuffer();
+    const head = new TextDecoder().decode(bytes.slice(0, 1024));
+    if (!head.includes('%PDF-')) throw new Error('This file does not contain a valid PDF header.');
+    if (!window.pdfjsLib) throw new Error('The PDF reader could not load. Check your internet connection and reload PrintFair.');
+    try {
+      window.pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
+      const task = window.pdfjsLib.getDocument({ data: new Uint8Array(bytes.slice(0)), isEvalSupported: false });
+      const pdf = await task.promise;
+      const pages = Number(pdf.numPages);
+      await pdf.destroy();
+      if (!Number.isInteger(pages) || pages < 1) throw new Error('The PDF has no readable pages.');
+      return { pages, bytes };
+    } catch (error) {
+      if (/password/i.test(error?.message || '')) throw new Error('This PDF is password-protected. Upload an unlocked copy.');
+      throw new Error(`The PDF could not be read. It may be damaged or password-protected. (${error.message || 'Unknown PDF error'})`);
+    }
+  }
+
+  async function renderPdfPreview(pageNumber) {
+    const canvas = $('#pdf-preview-canvas');
+    if (!canvas || !selectedPdfBytes || !window.pdfjsLib) return;
+    try {
+      window.pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
+      const task = window.pdfjsLib.getDocument({ data: new Uint8Array(selectedPdfBytes.slice(0)), isEvalSupported: false });
+      const pdf = await task.promise;
+      const page = await pdf.getPage(pageNumber);
+      const base = page.getViewport({ scale: 1 });
+      const ratio = Math.max(1, window.devicePixelRatio || 1);
+      const scale = Math.min(105 / base.width, 140 / base.height);
+      const viewport = page.getViewport({ scale });
+      canvas.width = Math.ceil(viewport.width * ratio);
+      canvas.height = Math.ceil(viewport.height * ratio);
+      canvas.style.width = `${viewport.width}px`;
+      canvas.style.height = `${viewport.height}px`;
+      const context = canvas.getContext('2d');
+      context.setTransform(ratio, 0, 0, ratio, 0, 0);
+      await page.render({ canvasContext: context, viewport }).promise;
+      await pdf.destroy();
+    } catch (error) { console.warn('PDF page preview could not be rendered:', error); }
+  }
+
+  async function applyCloudState() {
+    if (!cloudMode) return false;
+    const loaded = await backend.loadState();
+    if (!loaded) { state.role = null; render(); return false; }
+    state.role = loaded.profile.role;
+    state.student = loaded.profile;
+    state.stations = loaded.stations;
+    state.requests = loaded.requests;
+    state.previewTime = new Date().toISOString();
+    if (stopLiveUpdates) stopLiveUpdates();
+    stopLiveUpdates = backend.subscribe(async () => {
+      try {
+        const next = await backend.loadState();
+        if (!next) return;
+        state.role = next.profile.role; state.student = next.profile;
+        state.stations = next.stations; state.requests = next.requests;
+        state.previewTime = new Date().toISOString(); render();
+      } catch (error) { console.warn('PrintFair live refresh failed:', error); }
+    });
+    render();
+    return true;
+  }
+
+  async function restoreCloudSession() {
+    if (!cloudMode) return;
+    try {
+      const session = await backend.getSession();
+      if (session?.user) await applyCloudState();
+    } catch (error) { notify(`Backend connection: ${error.message}`); }
+  }
+
   function bindRange() {
     const input=$('#page-range'); if(!input) return;
     input.addEventListener('input',()=>{
@@ -357,15 +446,35 @@
       note.textContent=activeRequest()?'Another request is still active.':n===null?'Enter a valid page range.':allowed?`Available: ${remainingPages()} · Requested: ${n} · Remaining: ${remainingPages()-n}`:`Only ${remainingPages()} pages are available.`;
     });
   }
-  function submitRequest() {
+  async function submitRequest() {
+    if (!selectedPdfFile || !state.draft.totalPages) return notify('Choose and validate a PDF before submitting.');
     if(activeRequest()) return notify('Only one active request is allowed.');
     const n=validRange(state.draft.range,state.draft.totalPages);
-    if(n===null) return notify('Enter a valid PDF page range.');
-    if(n>remainingPages()) return notify(`Only ${remainingPages()} pages remain available.`);
-    const number=state.nextId++;
-    const r=sampleRecord(`PF-${number}`,state.draft.file,n,'Reserved',now().toISOString(),state.student,
-      {code:`CN3-${String(number).padStart(4,'0')}`,pageRange:state.draft.range,totalPages:state.draft.totalPages});
-    state.requests.unshift(r);save();navigate('requests');notify('Request created. Pages have been reserved.');
+    if(n===null) return notify('Enter a valid page range within the PDF.');
+    if(!window.PrintFairRules.canReserve(remainingPages(),n)) return notify(`Only ${remainingPages()} pages remain available.`);
+    try {
+      let r;
+      if (cloudMode) {
+        r = await backend.createRequest(selectedPdfFile, {
+          fileName: state.draft.file, totalPages: state.draft.totalPages,
+          range: state.draft.range, requestedPages: n
+        });
+        const latest = await backend.loadState();
+        if (latest) { state.student=latest.profile; state.stations=latest.stations; state.requests=latest.requests; }
+      } else {
+        const number=state.nextId++;
+        const id=`PF-${number}`;
+        await window.PrintFairFiles.put(id, selectedPdfFile);
+        r=sampleRecord(id,state.draft.file,n,'Reserved',now().toISOString(),state.student,
+          {code:`CN3-${String(number).padStart(4,'0')}`,pageRange:state.draft.range,totalPages:state.draft.totalPages});
+        r.storageKey=id;
+        state.requests.unshift(r); save();
+      }
+      selectedPdfFile=null; selectedPdfBytes=null;
+      if(uiDraftFileUrl) { URL.revokeObjectURL(uiDraftFileUrl); uiDraftFileUrl=null; }
+      state.draft={file:'No document selected',totalPages:0,range:'',isSample:false}; save();
+      navigate('requests'); notify('Request created. Your selected pages have been reserved.');
+    } catch (error) { notify(error.message || 'The request could not be submitted.'); }
   }
   function openModal(title,contents,actions) {
     document.querySelector('.modal-overlay')?.remove();
@@ -387,12 +496,12 @@
     switch(action) {
       case 'notifications': notify('No new notifications.'); break;
       case 'start-upload': if(activeRequest()) {notify('Resolve your active request before making another.');navigate('requests');}else navigate('upload'); break;
-      case 'review': navigate('review'); break;
+      case 'review': if(!selectedPdfFile || !state.draft.totalPages) { notify('Select and validate a PDF first.'); navigate('upload'); } else navigate('review'); break;
       case 'prev-preview': case 'next-preview': {
         const curr=Number($('#preview-current')?.textContent)||1;
         const next=action==='next-preview'?Math.min(state.draft.totalPages,curr+1):Math.max(1,curr-1);
         if($('#preview-current')) $('#preview-current').textContent=next;
-        if($('#preview-page-num')) $('#preview-page-num').textContent=next;
+        renderPdfPreview(next);
         break;
       }
       case 'submit': submitRequest(); break;
@@ -402,18 +511,44 @@
         openModal('Cancel print request',`<p class="sm">Cancel ${escapeHTML(r.file)}? Its ${r.pages} reserved pages will be released. The request will remain in your history.</p>`,button('Keep request','close-modal','btn secondary')+button('Cancel request','confirm-cancel','btn danger'));
         break;
       }
-      case 'confirm-cancel': { const r=activeRequest(); if(r) { changeStatus(r,'Cancelled','Cancelled by student before retrieval');save(); } dismissModal();render();notify('Request cancelled and saved to history.'); break; }
+      case 'confirm-cancel': { const r=activeRequest(); if(r) {
+        if(cloudMode) backend.cancelRequest(r.id).then(async()=>{await applyCloudState();dismissModal();render();notify('Request cancelled. Reserved pages have been released.');}).catch(error=>notify(error.message));
+        else { changeStatus(r,'Cancelled','Cancelled by student before retrieval'); if(r.storageKey)window.PrintFairFiles.remove(r.storageKey).catch(()=>{}); save();dismissModal();render();notify('Request cancelled and saved to history.'); }
+      } else dismissModal(); break; }
       case 'copy-code': { const code=activeRequest()?.code; if(!code)return; if(navigator.clipboard?.writeText)navigator.clipboard.writeText(code).then(()=>notify('Code copied')).catch(()=>notify(`Code: ${code}`));else notify(`Code: ${code}`);break; }
       case 'open-kiosk': window.open('kiosk.html','_blank','noopener'); break;
       case 'role-student': signInRole='student';render();break;
       case 'role-admin': signInRole='admin';render();break;
+      case 'register': if(cloudMode) navigate('register'); else notify('Student registration is available after the shared backend is configured.'); break;
+      case 'back-to-login': navigate('login'); break;
+      case 'create-account': {
+        if(!cloudMode) return notify('Student registration requires a configured shared backend.');
+        const fullName=$('#register-name')?.value.trim(); const email=$('#register-email')?.value.trim();
+        const year=$('#register-year')?.value; const program=$('#register-program')?.value.trim(); const password=$('#register-password')?.value;
+        if(!fullName||!email||!year||!program||!password) return notify('Complete every field.');
+        if(!/^[^\s@]+@my\.xu\.edu\.ph$/i.test(email)) return notify('Use your official @my.xu.edu.ph email.');
+        if(password.length<8) return notify('Use a password with at least 8 characters.');
+        backend.signUp({fullName,email,year,program,password}).then(result=>{notify(result.session?'Account created. You can now sign in.':'Check your XU email to confirm your account, then sign in.');navigate('login');}).catch(error=>notify(error.message));
+        break;
+      }
       case 'sign-in': {
         const email=$('#login-email')?.value.trim();const pass=$('#login-password')?.value;
         if(!email||!email.includes('@')||!pass) return notify('Enter an email and password to continue.');
-        state.role=signInRole;save();navigate(state.role==='admin'?'dashboard-admin':'dashboard');notify('Signed in.');break;
+        if (cloudMode) {
+          backend.signIn(email,pass).then(async result=>{
+            if(result.profile.role!==signInRole) { await backend.signOut(); throw new Error(`This account is registered as ${result.profile.role}, not ${signInRole}.`); }
+            await applyCloudState(); navigate(state.role==='admin'?'dashboard-admin':'dashboard'); notify('Signed in to the shared PrintFair system.');
+          }).catch(error=>notify(error.message));
+        } else { state.role=signInRole;save();navigate(state.role==='admin'?'dashboard-admin':'dashboard');notify('Signed in to local demo mode.'); }
+        break;
       }
-      case 'logout': state.role=null;save();navigate('login');break;
-      case 'forgot-password': notify('Password recovery is not available yet.');break;
+      case 'logout': {
+        selectedPdfFile=null; selectedPdfBytes=null; state.draft={file:'No document selected',totalPages:0,range:'',isSample:false};
+        if(uiDraftFileUrl) { URL.revokeObjectURL(uiDraftFileUrl); uiDraftFileUrl=null; }
+        if(cloudMode) backend.signOut().then(()=>{if(stopLiveUpdates)stopLiveUpdates();state.role=null;state.requests=[];navigate('login');}).catch(error=>notify(error.message));
+        else {state.role=null;save();navigate('login');} break;
+      }
+      case 'forgot-password': { const email=$('#login-email')?.value.trim(); if(cloudMode&&email) backend.sendPasswordReset(email).then(()=>notify('Password reset email sent.')).catch(error=>notify(error.message)); else notify('Enter your email first. Password recovery is available after backend setup.'); break; }
       case 'guidelines': navigate('guidelines');break;
       case 'back-to-profile': navigate(state.role==='admin'?'profile-admin':'profile');break;
       case 'reset-demo': openModal('Reset sample data','<p class="sm">Restore the original sample accounts, stations, and request history?</p>',button('Keep current data','close-modal','btn secondary')+button('Reset sample data','confirm-reset','btn danger'));break;
@@ -422,7 +557,9 @@
       case 'save-station': {
         const name=$('#new-station-name')?.value.trim();const floor=$('#new-station-floor')?.value.trim();
         if(!name||!floor)return notify('Enter the station and its location.');
-        state.stations.push({id:`station-${state.stations.length+1}`,name,floor,status:'Operational',reason:'',updatedAt:now().toISOString()});save();dismissModal();render();notify('Station added.');break;
+        const station={id:`station-${Date.now()}`,name,floor,status:'Operational',reason:'',updatedAt:now().toISOString()};
+        if(cloudMode) backend.addStation(station).then(saved=>{state.stations.push(saved);dismissModal();render();notify('Station added to the shared system.');}).catch(error=>notify(error.message));
+        else {state.stations.push(station);save();dismissModal();render();notify('Station added.');} break;
       }
       case 'open-correction': correctionModal();break;
       case 'save-correction': {
@@ -434,9 +571,13 @@
         const reservedOther=currentUserRequests().filter(x=>isToday(x)&&x.id!==r.id&&x.status==='Reserved').reduce((n,x)=>n+x.pages,0);
         const usedOther=currentUserRequests().filter(x=>isToday(x)&&x.id!==r.id).reduce((n,x)=>n+(x.countedPages||0),0);
         if(r.email===state.student.email&&isToday(r)&&usedOther+reservedOther+pages+(next==='Reserved'?r.pages:0)>LIMIT) return notify('Correction would exceed the recorded daily allowance.');
-        changeStatus(r,next,reason);r.countedPages=pages;
-        state.corrections.push({id:r.id,status:next,previousStatus:r.history.at(-2)?.status||next,countedPages:pages,reason,at:now().toISOString()});
-        save();dismissModal();render();notify('Correction saved to the request history.');break;
+        if(cloudMode) {
+          backend.correctRequest(r.id,next,pages,reason).then(async()=>{await applyCloudState();dismissModal();render();notify('Correction saved to the shared request history.');}).catch(error=>notify(error.message));
+        } else {
+          changeStatus(r,next,reason);r.countedPages=pages;
+          state.corrections.push({id:r.id,status:next,previousStatus:r.history.at(-2)?.status||next,countedPages:pages,reason,at:now().toISOString()});
+          save();dismissModal();render();notify('Correction saved to the request history.');
+        } break;
       }
       case 'close-modal': dismissModal();break;
       default: if(routes[action]) navigate(action);
@@ -453,16 +594,21 @@
     const input=event.target;
     if(input.id==='pdf-file') {
       const file=input.files?.[0]; if(!file)return;
-      if(!/\.pdf$/i.test(file.name)||!(file.type==='application/pdf'||file.type==='')) return notify('Select a PDF file.');
-      if(uiDraftFileUrl) URL.revokeObjectURL(uiDraftFileUrl);
-      uiDraftFileUrl=URL.createObjectURL(file);
-      state.draft={file:file.name,totalPages:12,range:'1-8',isSample:false};
-      save();render();notify('PDF selected. For demo for now.');
+      selectedPdfFile=null; selectedPdfBytes=null;
+      if(uiDraftFileUrl) { URL.revokeObjectURL(uiDraftFileUrl); uiDraftFileUrl=null; }
+      inspectPdf(file).then(parsed=>{
+        selectedPdfFile=file; selectedPdfBytes=parsed.bytes;
+        uiDraftFileUrl=URL.createObjectURL(file);
+        state.draft={file:file.name,totalPages:parsed.pages,range:`1-${Math.min(8,parsed.pages)}`,isSample:false};
+        save();render();notify(`PDF validated: ${parsed.pages} actual pages detected.`);
+      }).catch(error=>{selectedPdfFile=null;selectedPdfBytes=null;state.draft={file:'No document selected',totalPages:0,range:'',isSample:false};render();notify(error.message);});
     }
     if(input.matches('[data-station]')) {
       if(state.role!=='admin')return;
       const station=state.stations.find(s=>s.id===input.dataset.station);
-      if(station){station.status=input.value;station.reason=station.status==='Operational'?'':station.status==='Unavailable'?'Printer issue reported':'Under maintenance';station.updatedAt=now().toISOString();save();render();notify('Station status updated.');}
+      if(station){const reason=input.value==='Operational'?'':input.value==='Unavailable'?'Printer issue reported':'Under maintenance';
+        if(cloudMode) backend.updateStation(station.id,input.value,reason).then(updated=>{Object.assign(station,updated);render();notify('Station status updated for all connected users.');}).catch(error=>{render();notify(error.message);});
+        else {station.status=input.value;station.reason=reason;station.updatedAt=now().toISOString();save();render();notify('Station status updated.');}}
     }
   });
   document.addEventListener('input',event=>{
@@ -475,7 +621,7 @@
   });
   window.addEventListener('hashchange',render);
   window.addEventListener('storage',event=>{
-    if(event.key===STORE_KEY&&event.newValue) {try{state=migrate(JSON.parse(event.newValue));render()}catch(e){console.warn('Could not load the demo update',e);}}
+    if(!cloudMode && event.key===STORE_KEY&&event.newValue) {try{state=migrate(JSON.parse(event.newValue));render()}catch(e){console.warn('Could not load the demo update',e);}}
   });
   window.PrintFairDemo = {
     getState:()=>structuredClone(state),
@@ -487,5 +633,8 @@
     expireActive:()=>{const r=activeRequest();if(!r)return false;changeStatus(r,'Expired','Demonstrated code expiry');save();render();return true;},
     setTime:iso=>{if(!Number.isFinite(new Date(iso).getTime()))return false;state.previewTime=iso;expirePending();save();render();return true;}
   };
-  save();render();
+  if (cloudMode) state.role=null;
+  else save();
+  render();
+  restoreCloudSession();
 })();

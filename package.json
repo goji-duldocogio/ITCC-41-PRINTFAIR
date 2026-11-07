@@ -4,7 +4,8 @@
   "private": true,
   "description": "PrintFair mobile interface and PC document retrieval webpage",
   "scripts": {
-    "serve": "python -m http.server 8765 --directory www"
+    "serve": "python -m http.server 8765 --directory www",
+    "test": "node tests/printfair-smoke-test.js"
   },
   "devDependencies": {},
   "cordova": {

@@ -21,3 +21,5 @@ body { padding: 0 !important; }
   #app { max-width: 410px; }
   .bottomnav { width: 410px; }
 }
+
+.pdf-page{display:flex;align-items:center;justify-content:center;overflow:hidden}.pdf-page canvas{display:block;max-width:100%;max-height:100%;object-fit:contain}

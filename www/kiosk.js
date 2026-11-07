@@ -1,42 +1,155 @@
-/* pc retrieval UI, shares demonstration localStorage with mobile ui in the same browser profile. */
+/* Library PC retrieval. Cloud mode uses authenticated staff + one-time database RPCs. */
 (() => {
   'use strict';
-  const KEY='printfair-m2-prototype-2026';
-  const input=document.querySelector('#k-code');
-  const message=document.querySelector('#message');
-  const result=document.querySelector('#result');
-  const getState=()=>{try{return JSON.parse(localStorage.getItem(KEY)||'null')}catch{return null}};
-  const show=(text,kind='error')=>{message.textContent=text;message.className=kind;};
-  const clean=()=>{result.hidden=true;input.value='';message.textContent='';message.className='';input.focus();};
-  function retrieve() {
-    result.hidden=true;
-    const code=input.value.trim().toUpperCase();
-    if(!code) return show('Enter the code from your mobile request.');
-    const state=getState();
-    if(!state) return show('For demo for now, open PrintFair in another tab of the same browser.');
-    const r=state.requests?.find(x=>String(x.code||'').toUpperCase()===code);
-    if(!r) return show('Code not found. Check the code in My Requests.');
-    if(r.status!=='Reserved') return show(`This request is ${String(r.status).toLowerCase()}; the code is no longer valid.`);
-    const time=state.previewTime||new Date().toISOString();
-    if(new Date(`${r.createdAt.slice(0,10)}T16:30:00+08:00`).getTime()<=new Date(time).getTime()) {
-      r.status='Expired'; r.reason='Unused retrieval code expired';
-      r.history ||= []; r.history.push({status:'Expired',at:time,reason:r.reason});
-      localStorage.setItem(KEY,JSON.stringify(state));
-      return show('This code has expired. The request remains in your history.');
-    }
-    r.status='Retrieved';
-    r.retrievedAt=time;
-    r.countedPages=r.pages;
-    r.stationId='new5';
-    r.reason='Document retrieved from PrintFair PC demo';
-    r.history ||= [];r.history.push({status:'Retrieved',at:time,reason:r.reason});
-    localStorage.setItem(KEY,JSON.stringify(state));
-    document.querySelector('#filename').textContent=r.file;
-    document.querySelector('#details').textContent=`${r.pages} pages requested · Range ${r.pageRange} · Retrieved`;
-    result.hidden=false;
-    show('Code accepted. The retrieval is now recorded in PrintFair.','success');
+  const KEY = 'printfair-m3-prototype-2026';
+  const backend = window.PrintFairBackend;
+  const cloudMode = Boolean(backend?.isConfigured());
+  const input = document.querySelector('#k-code');
+  const message = document.querySelector('#message');
+  const result = document.querySelector('#result');
+  const authPanel = document.querySelector('#staff-auth');
+  const retrievePanel = document.querySelector('#retrieve-panel');
+  const staffMessage = document.querySelector('#staff-message');
+  const staffLogout = document.querySelector('#staff-logout');
+  const openPdf = document.querySelector('#open-pdf');
+  let staffProfile = null;
+  let currentObjectUrl = null;
+
+  function populateStations(stations) {
+    const select = document.querySelector('#station-id');
+    if (!select || !Array.isArray(stations)) return;
+    const previous = select.value;
+    select.replaceChildren();
+    stations.forEach(station => {
+      const option = document.createElement('option');
+      option.value = station.id;
+      option.textContent = `${station.name} · ${station.floor}${station.status === 'Operational' ? '' : ` (${station.status})`}`;
+      option.disabled = station.status !== 'Operational';
+      select.appendChild(option);
+    });
+    if ([...select.options].some(option => option.value === previous && !option.disabled)) select.value = previous;
   }
-  document.querySelector('#retrieve').addEventListener('click',retrieve);
-  input.addEventListener('keydown',event=>{if(event.key==='Enter')retrieve();});
-  document.querySelector('#reset').addEventListener('click',clean);
+
+  const show = (text, kind='error') => { message.textContent = text; message.className = kind; };
+  const showStaff = (text, kind='error') => { staffMessage.textContent = text; staffMessage.className = kind; };
+  const getState = () => { try { return JSON.parse(localStorage.getItem(KEY) || 'null'); } catch { return null; } };
+  const clean = () => {
+    result.hidden = true; openPdf.hidden = true; input.value = ''; message.textContent = ''; message.className = '';
+    if (currentObjectUrl) { URL.revokeObjectURL(currentObjectUrl); currentObjectUrl = null; }
+    input.focus();
+  };
+
+  async function checkStaffSession() {
+    if (!cloudMode) {
+      authPanel.hidden = true; retrievePanel.hidden = false;
+      staffLogout.hidden = true;
+      const localState = getState(); if (localState?.stations) populateStations(localState.stations);
+      document.querySelector('#kiosk-mode-note').textContent = 'Demo mode only: student and kiosk data are stored in this browser profile.';
+      show('Demo mode: use the same browser profile as the student app. PDF storage is local to this browser.','info');
+      return;
+    }
+    authPanel.hidden = false; retrievePanel.hidden = true; staffLogout.hidden = true;
+    const session = await backend.getSession();
+    if (!session?.user) { staffProfile = null; return; }
+    staffProfile = await backend.getProfile(session.user.id);
+    if (staffProfile.role !== 'admin') {
+      await backend.signOut(); staffProfile = null;
+      showStaff('This account is not authorized for library PC retrieval.');
+      return;
+    }
+    const stations = await backend.loadStations(); populateStations(stations);
+    authPanel.hidden = true; retrievePanel.hidden = false; staffLogout.hidden = false;
+    document.querySelector('#kiosk-mode-note').textContent = 'Shared backend connected. A successful retrieval does not verify physical printing.';
+    show(`Signed in as ${staffProfile.display || staffProfile.name}. Select an operational station and enter the student code.`, 'info');
+  }
+
+  async function staffLogin() {
+    const email = document.querySelector('#staff-email').value.trim();
+    const password = document.querySelector('#staff-password').value;
+    if (!email || !password) return showStaff('Enter your staff email and password.');
+    try {
+      const result = await backend.signIn(email, password);
+      if (result.profile.role !== 'admin') {
+        await backend.signOut();
+        throw new Error('This account is not authorized for library PC retrieval.');
+      }
+      staffProfile = result.profile;
+      await checkStaffSession();
+      showStaff('Staff sign-in successful.', 'success');
+    } catch (error) { showStaff(error.message || 'Staff sign-in failed.'); }
+  }
+
+  async function localRetrieve(code) {
+    const state = getState();
+    if (!state) throw new Error('No local demo data found. Open the student app in this browser first.');
+    const record = state.requests?.find(x => String(x.code || '').toUpperCase() === code);
+    if (!record) throw new Error('Code not found. Check the code in My Requests.');
+    if (record.status !== 'Reserved') throw new Error(`This request is ${String(record.status).toLowerCase()}; its code is no longer valid.`);
+    const time = state.previewTime || new Date().toISOString();
+    const expiresAt = record.expiresAt || `${String(record.createdAt).slice(0,10)}T16:30:00+08:00`;
+    if (new Date(expiresAt).getTime() <= new Date(time).getTime()) {
+      record.status = 'Expired'; record.reason = 'Unused retrieval code expired'; record.countedPages = 0;
+      record.history ||= []; record.history.push({ status:'Expired', at:time, reason:record.reason });
+      localStorage.setItem(KEY, JSON.stringify(state));
+      throw new Error('This retrieval code has expired. The request remains in history.');
+    }
+    const stationId = document.querySelector('#station-id').value;
+    const station = state.stations?.find(x => x.id === stationId);
+    if (station && station.status !== 'Operational') throw new Error('The selected station is not operational. Choose another station.');
+    let blob = record.storageKey ? await window.PrintFairFiles.get(record.storageKey) : null;
+    let demoSample = false;
+    if (!blob && !record.storageKey) {
+      blob = await fetch('assets/Sample_Research_Paper.pdf').then(response => {
+        if (!response.ok) throw new Error('The sample document is unavailable.');
+        return response.blob();
+      });
+      demoSample = true;
+    }
+    if (!blob) throw new Error('The PDF file could not be found. The request was not marked as retrieved. Upload the document again in this browser.');
+    record.status = 'Retrieved'; record.retrievedAt = time; record.countedPages = record.pages;
+    record.stationId = stationId; record.reason = 'Document retrieved from the local kiosk demo';
+    record.history ||= []; record.history.push({ status:'Retrieved', at:time, reason:record.reason });
+    localStorage.setItem(KEY, JSON.stringify(state));
+    return { record, url: URL.createObjectURL(blob), demoSample };
+  }
+
+  async function retrieve() {
+    result.hidden = true; openPdf.hidden = true;
+    const code = input.value.trim().toUpperCase();
+    if (!code) return show('Enter the code from the student request.');
+    try {
+      let record, url, demoSample = false;
+      if (cloudMode) {
+        if (staffProfile?.role !== 'admin') throw new Error('Authorized library staff sign-in is required.');
+        record = await backend.claimCode(code, document.querySelector('#station-id').value);
+        if (record.status === 'Expired') throw new Error('This retrieval code has expired. The request remains in history.');
+        if (record.status !== 'Retrieved') throw new Error('The retrieval could not be completed.');
+        url = await backend.signedPdfUrl(record.storagePath);
+      } else {
+        const result = await localRetrieve(code);
+        record = result.record; url = result.url; demoSample = result.demoSample;
+        currentObjectUrl = url;
+      }
+      document.querySelector('#filename').textContent = record.file;
+      document.querySelector('#details').textContent = `${record.pages} pages requested · Range ${record.pageRange} · Retrieved`;
+      openPdf.href = url;
+      openPdf.textContent = demoSample ? 'Open sample PDF (demo only)' : 'Open prepared PDF';
+      openPdf.hidden = false;
+      result.hidden = false;
+      show(cloudMode ? 'Code accepted. The private PDF is ready to open on this library PC.' : 'Code accepted. Retrieval was recorded in this browser demo.', 'success');
+    } catch (error) {
+      show(error.message || 'The retrieval could not be completed.');
+    }
+  }
+
+  document.querySelector('#retrieve').addEventListener('click', retrieve);
+  input.addEventListener('keydown', event => { if (event.key === 'Enter') retrieve(); });
+  document.querySelector('#reset').addEventListener('click', clean);
+  document.querySelector('#staff-login')?.addEventListener('click', staffLogin);
+  document.querySelector('#staff-password')?.addEventListener('keydown', event => { if (event.key === 'Enter') staffLogin(); });
+  staffLogout?.addEventListener('click', async () => {
+    try { await backend.signOut(); staffProfile = null; clean(); await checkStaffSession(); }
+    catch (error) { show(error.message); }
+  });
+  checkStaffSession().catch(error => showStaff(error.message || 'Could not verify staff session.'));
 })();
