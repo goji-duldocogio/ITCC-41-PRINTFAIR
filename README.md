@@ -3,7 +3,9 @@ System for XU Library Printing Services
 
 Main Features:
 Document and Printing Request Management - Students can upload PDF documents, review document information and page counts, submit printing requests, and monitor request status.
+
 Print Access and Station Management - Students can view printing station information. Administrators can manage station availability. The separate kiosk webpage accepts retrieval codes and provides access to prepared documents.
+
 Printing Allowance and Transaction Management - The application validates the daily page allowance and records request and transaction activity. Students can view printing history, while administrators can review transaction details.
 
 
